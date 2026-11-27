@@ -1,10 +1,12 @@
-// Утреннее напоминание в Telegram: долги магазинов и «пора заказывать».
-// Запускается GitHub Actions по расписанию. Секреты: FB_EMAIL, FB_PASSWORD, TG_TOKEN, TG_CHAT_ID.
+// Telegram-бот Fairy Baby. Запускается GitHub Actions.
+// MODE=daily: утреннее сообщение (долги, пора заказывать, остатки).
+// MODE=poll: отвечает на команды /ostatok, /dolgi, /vse (проверка каждые несколько минут).
+// Секреты: FB_EMAIL, FB_PASSWORD, TG_TOKEN, TG_CHAT_ID.
 const API_KEY = "AIzaSyAbZ04WARp1d0OITEqbVCbs22a89KIQNdc";
 const PROJECT = "fairy-baby";
 const SITE = "https://lunat1k17.github.io/fairy-baby/";
 const env = process.env;
-const ALWAYS = env.ALWAYS === "true";
+const MODE = env.MODE || "daily";
 
 const fmt = n => Math.round(n).toLocaleString("ru-RU").replace(/ | /g, " ");
 const money = n => fmt(n) + " сум";
@@ -91,10 +93,20 @@ function build(D) {
     for (const p of low) { const q = stock(p.id); L.push(`• ${esc(p.name)}: ${q <= 0 ? "нет на складе" : "осталось " + fmt(q) + " пач."} (порог ${fmt(p.minStock)})`); }
     L.push("");
   }
-  const has = L.length > 0;
+  const S = ["📊 <b>Остатки на складе</b>"];
+  const prods = D.products.slice().sort((a, b) => (a.order || 0) - (b.order || 0));
+  let total = 0;
+  for (const p of prods) { const q = stock(p.id); total += Math.max(q, 0); const lowMark = (p.minStock || 0) > 0 && q <= p.minStock ? " ⚠️" : ""; S.push(`• ${esc(p.name)}: <b>${fmt(q)}</b> пач.${lowMark}`); }
+  if (!prods.length) S.push("Товаров пока нет.");
+  else S.push(`Всего: <b>${fmt(total)}</b> пач.`);
   const head = `<b>Fairy Baby · ${fmtDate(t)}</b>`;
-  const text = has ? [head, "", ...L, `<a href="${SITE}">Открыть сайт</a>`].join("\n") : `${head}\n\n✅ Сегодня нет долгов к оплате и все размеры в наличии.`;
-  return { has, text };
+  const site = `<a href="${SITE}">Открыть сайт</a>`;
+  const debtText = debts.length || low.length ? L.join("\n").trim() : "✅ Сегодня нет долгов к оплате и все размеры в наличии.";
+  return {
+    daily: [head, "", debtText, "", ...S, "", site].join("\n"),
+    stock: [head, "", ...S].join("\n"),
+    debts: [head, "", debtText].join("\n"),
+  };
 }
 
 async function main() {
@@ -108,10 +120,34 @@ async function main() {
     console.log("Отправил номер чата в Telegram.");
     return;
   }
-  const { has, text } = build(await loadData());
-  if (env.FIXTURE) { console.log(text); return; }
-  if (!has && !ALWAYS) { console.log("Сегодня напоминать не о чем."); return; }
-  await tg("sendMessage", { chat_id: env.TG_CHAT_ID, text, parse_mode: "HTML", disable_web_page_preview: true });
-  console.log("Напоминание отправлено.");
+  if (MODE === "poll") return poll();
+  const r = build(await loadData());
+  if (env.FIXTURE) { console.log(r.daily + "\n-----\n" + r.stock + "\n-----\n" + r.debts); return; }
+  await tg("setMyCommands", { commands: [{ command: "ostatok", description: "Остатки на складе" }, { command: "dolgi", description: "Долги и что пора заказать" }, { command: "vse", description: "Всё вместе" }] });
+  await send(r.daily);
+  console.log("Сообщение отправлено.");
+}
+const send = text => tg("sendMessage", { chat_id: env.TG_CHAT_ID, text, parse_mode: "HTML", disable_web_page_preview: true });
+
+async function poll() {
+  const ups = await tg("getUpdates", { timeout: 0, allowed_updates: ["message"] });
+  if (!ups.length) { console.log("Новых команд нет."); return; }
+  const cmds = ups.map(u => u.message).filter(m => m && String(m.chat.id) === String(env.TG_CHAT_ID) && m.text)
+    .map(m => m.text.trim().toLowerCase().split(/[\s@]/)[0]);
+  // Подтверждаем, чтобы Telegram не прислал эти сообщения снова.
+  await tg("getUpdates", { offset: ups[ups.length - 1].update_id + 1, timeout: 0 });
+  const want = new Set();
+  for (const c of cmds) {
+    if (["/ostatok", "/sklad", "остаток", "остатки", "склад"].includes(c)) want.add("stock");
+    else if (["/dolgi", "долги", "долг"].includes(c)) want.add("debts");
+    else if (["/vse", "/start", "/help", "всё", "все"].includes(c)) want.add("daily");
+    else want.add("help");
+  }
+  if (!want.size) { console.log("Команд от владельца нет."); return; }
+  if (want.has("help") && want.size === 1) { await send("Команды:\n/ostatok — остатки на складе\n/dolgi — долги и что пора заказать\n/vse — всё вместе"); return; }
+  want.delete("help");
+  const r = build(await loadData());
+  for (const w of want) await send(r[w]);
+  console.log("Ответил на команды: " + [...want].join(", "));
 }
 main().catch(e => { console.error(e.message); process.exit(1); });

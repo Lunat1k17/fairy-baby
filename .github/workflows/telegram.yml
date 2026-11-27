@@ -1,10 +1,14 @@
 name: Напоминание в Telegram
 on:
   schedule:
-    - cron: "0 4 * * *"   # каждый день в 9:00 по Ташкенту
+    - cron: "0 4 * * *"     # каждый день в 9:00 по Ташкенту: утреннее сообщение
+    - cron: "*/5 * * * *"   # каждые 5 минут: ответы на команды /ostatok, /dolgi
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: telegram-${{ github.event.schedule == '*/5 * * * *' && 'poll' || 'daily' }}
+  cancel-in-progress: false
 jobs:
   remind:
     runs-on: ubuntu-latest
@@ -20,4 +24,4 @@ jobs:
           FB_PASSWORD: ${{ secrets.FB_PASSWORD }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          ALWAYS: ${{ github.event_name == 'workflow_dispatch' }}
+          MODE: ${{ github.event.schedule == '*/5 * * * *' && 'poll' || 'daily' }}
