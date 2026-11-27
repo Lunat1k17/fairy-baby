@@ -314,15 +314,16 @@ function quickActions(){
 function opRow(o,withDelete){
   const t=OPS[o.type]||{name:o.type,ico:"ops",cls:"acc"};let title=t.name,det=[];
   if(o.type==="sale"||o.type==="purchase"){title=prodName(o.productId);det.push(t.name.toLowerCase()+", "+num(o.qty)+" пач. × "+fmt(o.price));}
+  if(o.adj)title="Уточнение долга поставщику";
   const pn=partyName(o.partyId);if(pn)det.push(pn);if(o.method)det.push(payDesc(o));if(o.dueDate)det.push("срок до "+fmtDate(o.dueDate));if(o.note)det.push(o.note);
   const sign=(o.type==="sale"||o.type==="pay_in")?"+":(o.type==="purchase"||o.type==="pay_out"||o.type==="expense")?"−":"";
-  const cls=sign==="+"?"good":sign==="−"?"bad":"warn";
+  const cls=sign==="+"?"good":sign==="−"?"bad":"warn";const amt=o.adj?(o.amount>=0?"+":"−")+fmt(Math.abs(o.amount)):sign+fmt(opAmount(o));
   return '<div class="item"><div class="lead"><span class="ico '+t.cls+'">'+svg(t.ico)+'</span><div style="min-width:0"><div class="t">'+esc(title)+'</div><div class="d">'+fmtDate(o.date)+(det.length?' · '+esc(det.join(" · ")):"")+'</div></div></div>'+
-   '<div class="r"><div class="'+cls+'">'+sign+fmt(opAmount(o))+'</div>'+(withDelete?'<button class="sm link" data-del="'+o.id+'">Удалить</button>':"")+'</div></div>';
+   '<div class="r"><div class="'+cls+'">'+amt+'</div>'+(withDelete?'<button class="sm link" data-del="'+o.id+'">Удалить</button>':"")+'</div></div>';
 }
 function homeDebts(){const ms=mainSupplier();const sup=S.parties.filter(p=>p.kind==="supplier");const myDebt=sup.reduce((a,p)=>a+Math.max(0,partyStats(p.id).debt),0);
   const shops=S.parties.filter(p=>p.kind!=="supplier").map(p=>({p,d:partyStats(p.id).debt})).filter(r=>r.d>0.5).sort((a,b)=>b.d-a.d);const owed=shops.reduce((a,r)=>a+r.d,0);
-  return '<div class="card"><h2>Долги</h2><div class="grid2">'+
+  return '<div class="card"><div class="row sb"><h2>Долги</h2>'+(ms?'<button class="sm link" data-act="supdebt">Изменить мой долг</button>':'')+'</div><div class="grid2">'+
    '<div class="tile click" '+(ms?'data-party="'+ms.id+'"':'data-tab="suppliers"')+' style="cursor:pointer;box-shadow:none;background:var(--bad-soft);border-color:transparent"><span class="l">Мой долг '+(ms?esc(ms.name):"поставщику")+'</span><span class="v bad">'+money(myDebt)+'</span></div>'+
    '<div class="tile" data-tab="shops" style="cursor:pointer;box-shadow:none;background:var(--good-soft);border-color:transparent"><span class="l">Магазины должны мне</span><span class="v good">'+money(owed)+'</span><span class="sub">'+shops.length+' '+plural(shops.length,"магазин","магазина","магазинов")+'</span></div></div>'+
    (shops.length?'<div class="list">'+shops.map(r=>'<div class="item click" data-party="'+r.p.id+'"><div class="lead"><span class="ico warn">'+esc(r.p.name.trim().charAt(0).toUpperCase()||"?")+'</span><span class="t">'+esc(r.p.name)+'</span></div><span class="r warn">'+money(r.d)+'</span></div>').join("")+'</div>':'<div class="hint">Сейчас ни один магазин не должен.</div>')+'</div>';}
@@ -383,11 +384,11 @@ function viewStock(){
      (p.weight?'<span class="sub">'+esc(p.weight)+'</span>':'')+'<span class="sub">Закупка '+(avgCost(p.id)?fmt(avgCost(p.id)):'—')+' · Продажа '+(p.sellPrice?fmt(p.sellPrice):'—')+'</span></button>';}).join("")+'</div>'+
    '<span class="hint">Нажмите на товар, чтобы изменить цену, название или порог «мало».</span></div>';
 }
-function partyStats(pid){let goods=0,paid=0,old=0;const kind=(S.parties.find(p=>p.id===pid)||{}).kind;
+function partyStats(pid){let goods=0,paid=0,old=0,adj=0;const kind=(S.parties.find(p=>p.id===pid)||{}).kind;
   for(const o of S.ops){if(o.partyId!==pid)continue;const a=opAmount(o);
-    if(kind==="supplier"){if(o.type==="purchase")goods+=a;else if(o.type==="pay_out")paid+=a;else if(o.type==="debt_me")old+=a;}
+    if(kind==="supplier"){if(o.type==="purchase")goods+=a;else if(o.type==="pay_out")paid+=a;else if(o.type==="debt_me"){if(o.adj)adj+=a;else old+=a;}}
     else{if(o.type==="sale")goods+=a;else if(o.type==="pay_in")paid+=a;else if(o.type==="debt_they")old+=a;}}
-  return{goods,paid,old,debt:goods+old-paid};}
+  return{goods,paid,old,adj,debt:goods+old+adj-paid};}
 function partyRows(kind){const q=S.q.trim().toLowerCase();
   return S.parties.filter(p=>(p.kind==="supplier")===(kind==="supplier")).filter(p=>!q||p.name.toLowerCase().includes(q)||(p.phone||"").includes(q))
    .map(p=>({p,st:partyStats(p.id),d:lastActivity(p.id)})).sort((a,b)=>b.st.debt-a.st.debt||a.p.name.localeCompare(b.p.name));}
@@ -594,6 +595,15 @@ function sheetPayment(preParty,preDir){
       const d=curDebt();if(d<0.5)throw new Error("Долга нет, оплату записывать не нужно.");if(pv.amount>d+0.5)throw new Error("Сумма больше долга. Максимум "+money(d)+".");
       await S.db.collection("ops").add({type:dir==="in"?"pay_in":"pay_out",partyId:f.party.value,amount:pv.amount,cash:pv.cash,card:pv.card,method:pv.method,date:f.date.value||today(),note:f.note.value.trim(),createdAt:Date.now()});},"Оплата сохранена");});});
 }
+function sheetSupDebt(pid){const ms=S.parties.find(p=>p.id===pid)||mainSupplier();if(!ms){toast("Сначала добавьте поставщика.");return;}const cur=partyStats(ms.id).debt;
+  openSheet(sheetHead("Мой долг "+esc(ms.name))+'<form id="f"><div class="total">Сейчас по учёту: '+money(Math.max(cur,0))+(cur<-0.5?' (переплата '+money(-cur)+')':'')+'</div>'+
+   '<label>Сколько я должен на самом деле<input name="amount" inputmode="numeric" required value="'+Math.round(Math.max(cur,0))+'"></label>'+
+   '<div class="grid2"><label>Дата<input type="date" name="date" value="'+today()+'"></label><label>Причина<input name="note" placeholder="сверка с поставщиком"></label></div>'+
+   '<div class="hint" id="adjDiff"></div><span class="hint">Разница запишется в журнал как «Уточнение долга». Удалите её там, если ошиблись.</span>'+
+   '<button class="pri" type="submit">Сохранить</button></form>',()=>{const f=$("#f");
+    const upd=()=>{const d=parseNum(f.amount.value)-cur;$("#adjDiff").textContent=Math.abs(d)<0.5?"Долг не меняется.":(d>0?"Долг увеличится на ":"Долг уменьшится на ")+money(Math.abs(d));};f.amount.addEventListener("input",upd);upd();
+    f.addEventListener("submit",e=>{e.preventDefault();save(async()=>{const v=f.amount.value.trim();if(v==="")throw new Error("Впишите сумму.");const d=parseNum(v)-cur;if(Math.abs(d)<0.5)return;
+      await S.db.collection("ops").add({type:"debt_me",adj:true,partyId:ms.id,amount:d,date:f.date.value||today(),note:f.note.value.trim()||"уточнение долга",createdAt:Date.now()});},"Долг обновлён");});});}
 function sheetOldDebt(){
   openSheet(sheetHead("Старый долг")+'<form id="f"><span class="hint">Для долгов, которые были до начала учёта.</span><div class="seg" id="dir"><button type="button" data-dir="they" class="on">Магазин должен мне</button><button type="button" data-dir="me">Я должен поставщику</button></div>'+
    '<label>Кто<select name="party">'+partyOptions("","","Выберите…")+'</select></label><label data-newparty hidden>Имя<input name="newname"></label>'+
@@ -634,8 +644,8 @@ function sheetPartyCard(id){
   openSheet(sheetHead(esc(p.name))+'<span class="sub">'+(sup?"Поставщик":"Магазин")+(p.phone?' · '+esc(p.phone):"")+(p.addr?' · '+esc(p.addr):"")+'</span>'+
    '<div class="tiles" style="grid-template-columns:repeat(3,minmax(0,1fr))">'+tile(sup?"Закуплено":"Взял товара",money(st.goods+st.old))+tile(sup?"Я отдал":"Отдал",money(st.paid),"good")+
      tile(st.debt>=-0.5?(sup?"Мой долг":"В долгу"):"Переплата",money(Math.abs(st.debt)),st.debt>0.5?(sup?"bad":"warn"):"good")+'</div>'+
-   (!sup&&st.debt>0.5?(()=>{const d=dueInfo(id);return d.next?'<div class="total '+(d.days<0?"bad":d.days<=2?"warn":"")+'">Срок оплаты: '+fmtDate(d.next.due)+' · '+dueLabel(d.days)+'</div>':'<div class="hint">Срок оплаты не указан.</div>';})():'')+
-   '<div class="row"><button class="pri" id="pp">'+(sup?"Я оплатил":"Магазин оплатил")+'</button>'+(sup?'<button id="np">+ Приход от него</button>':'<button id="np">+ Отдал товар</button>')+'<button id="ep">Изменить</button></div>'+
+   (sup&&Math.abs(st.adj)>0.5?'<div class="hint">С учётом уточнений долга: '+(st.adj>0?"+":"−")+money(Math.abs(st.adj))+'</div>':'')+(!sup&&st.debt>0.5?(()=>{const d=dueInfo(id);return d.next?'<div class="total '+(d.days<0?"bad":d.days<=2?"warn":"")+'">Срок оплаты: '+fmtDate(d.next.due)+' · '+dueLabel(d.days)+'</div>':'<div class="hint">Срок оплаты не указан.</div>';})():'')+
+   '<div class="row"><button class="pri" id="pp">'+(sup?"Я оплатил":"Магазин оплатил")+'</button>'+(sup?'<button id="np">+ Приход от него</button><button id="sd">Изменить долг</button>':'<button id="np">+ Отдал товар</button>')+'<button id="ep">Изменить</button></div>'+
    (remind?'<div class="card"><div class="row sb"><h2>Напоминание о долге</h2><button class="sm" id="cp">Скопировать</button></div><div class="copybox" id="rt">'+esc(remind)+'</div></div>':"")+
    (()=>{const gt=sup?"purchase":"sale";const g=ops.filter(o=>o.type===gt);if(!g.length)return"";const by={};for(const o of g){const k=o.productId;by[k]=by[k]||{q:0,s:0};by[k].q+=o.qty||0;by[k].s+=opAmount(o);}
      const rows=Object.entries(by).sort((a,b)=>b[1].q-a[1].q);const tq=rows.reduce((a,r)=>a+r[1].q,0);
@@ -646,7 +656,7 @@ function sheetPartyCard(id){
    '<div class="card"><h2>Как закрывался долг</h2>'+(pays.length?'<div class="list">'+pays.map(o=>'<div class="item"><div><div class="t">'+fmtDate(o.date)+'</div><div class="d">'+esc(payDesc(o)||o.note||"оплата")+(o.method&&o.note?' · '+esc(o.note):'')+'</div></div><span class="r good">'+money(o.amount)+'</span></div>').join("")+'</div>':'<div class="hint">Оплат пока не было.</div>')+'</div>'+
    '<div class="card"><h2>Вся история</h2>'+(ops.length?'<div class="list">'+ops.map(o=>opRow(o,false)).join("")+'</div>':'<div class="hint">Записей нет.</div>')+'</div>',()=>{
     $("#pp").addEventListener("click",()=>sheetPayment(id,sup?"out":"in"));$("#ep").addEventListener("click",()=>sheetParty(id));
-    $("#np").addEventListener("click",()=>sup?sheetBulkPurchase(id):sheetBulkSale(id));
+    $("#np").addEventListener("click",()=>sup?sheetBulkPurchase(id):sheetBulkSale(id));if(sup)$("#sd").addEventListener("click",()=>sheetSupDebt(id));
     const c=$("#cp");if(c)c.addEventListener("click",()=>{const done=()=>toast("Текст скопирован");try{navigator.clipboard.writeText(remind).then(done,()=>{selectText($("#rt"));toast("Выделил текст, скопируйте его");});}catch(e){selectText($("#rt"));}});});
 }
 function selectText(el){const r=document.createRange();r.selectNodeContents(el);const s=getSelection();s.removeAllRanges();s.addRange(r);}
@@ -680,7 +690,7 @@ document.addEventListener("click",e=>{
   if(t.dataset.del){const id=t.dataset.del;confirmInline(t,"Удалить?",async()=>{try{await S.db.doc("ops/"+id).delete();toast("Запись удалена");}catch(err){toast("Не удалось удалить");}});return;}
   const a=t.dataset.act;
   if(a==="sale")sheetBulkSale();else if(a==="purchase")sheetBulkPurchase();else if(a==="payment")sheetPayment();else if(a==="expense")sheetExpense();
-  else if(a==="party"||a==="newshop")sheetParty(null,"client");else if(a==="newsupplier")sheetParty(null,"supplier");else if(a==="payin")sheetPayment(null,"in");else if(a==="payout")sheetPayment(null,"out");else if(a==="product")sheetProduct();else if(a==="olddebt")sheetOldDebt();else if(a==="cashfix")sheetCashFix();else if(a==="seed")seedProducts();else if(a==="minstock")sheetMinStock();
+  else if(a==="party"||a==="newshop")sheetParty(null,"client");else if(a==="newsupplier")sheetParty(null,"supplier");else if(a==="payin")sheetPayment(null,"in");else if(a==="payout")sheetPayment(null,"out");else if(a==="product")sheetProduct();else if(a==="olddebt")sheetOldDebt();else if(a==="cashfix")sheetCashFix();else if(a==="seed")seedProducts();else if(a==="minstock")sheetMinStock();else if(a==="supdebt")sheetSupDebt();
 });
 function closeSheetSilently(){$("#sheetRoot").innerHTML="";}
 document.addEventListener("input",e=>{if(e.target.id==="q"){S.q=e.target.value;const box=$("#plist");if(box)box.innerHTML=partyList(box.dataset.kind);}});
