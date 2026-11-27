@@ -2,6 +2,7 @@
 // MODE=daily: утреннее сообщение (долги, пора заказывать, остатки).
 // MODE=poll: отвечает на команды /ostatok, /dolgi, /vse (проверка каждые несколько минут).
 // Секреты: FB_EMAIL, FB_PASSWORD, TG_TOKEN, TG_CHAT_ID.
+// ---core-start (общая часть, копируется в telegram-worker.js)
 const API_KEY = "AIzaSyAbZ04WARp1d0OITEqbVCbs22a89KIQNdc";
 const PROJECT = "fairy-baby";
 const SITE = "https://lunat1k17.github.io/fairy-baby/";
@@ -109,6 +110,8 @@ function build(D) {
   };
 }
 
+// ---core-end
+
 async function main() {
   if (!env.FIXTURE) for (const k of ["FB_EMAIL", "FB_PASSWORD", "TG_TOKEN"]) if (!env[k]) throw new Error("Нет секрета " + k);
   if (!env.TG_CHAT_ID && !env.FIXTURE) {
@@ -130,6 +133,9 @@ async function main() {
 const send = text => tg("sendMessage", { chat_id: env.TG_CHAT_ID, text, parse_mode: "HTML", disable_web_page_preview: true });
 
 async function poll() {
+  // Если подключён сервер Cloudflare (вебхук), команды отвечает он, а здесь делать нечего.
+  const wh = await tg("getWebhookInfo");
+  if (wh.url) { console.log("Команды обрабатывает сервер Cloudflare."); return; }
   const ups = await tg("getUpdates", { timeout: 0, allowed_updates: ["message"] });
   if (!ups.length) { console.log("Новых команд нет."); return; }
   const cmds = ups.map(u => u.message).filter(m => m && String(m.chat.id) === String(env.TG_CHAT_ID) && m.text)
