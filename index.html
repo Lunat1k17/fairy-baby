@@ -671,11 +671,27 @@ function setSync(cls,text){for(const id of["sync","sync2"]){const el=document.ge
 
 // ---------- standalone boot (Firebase) ----------
 function loginHTML(){return '<div class="card" style="max-width:420px"><h2 style="font-family:var(--display);font-weight:600;font-size:20px">Вход</h2><form id="loginF"><label>Email<input name="email" type="email" autocomplete="username" required></label><label>Пароль<input name="pass" type="password" autocomplete="current-password" required></label><button class="pri" type="submit">Войти</button><span class="hint" id="loginErr"></span></form></div>';}
-function importHTML(){return '<div class="card"><h2>Перенос данных</h2><span class="hint">Загрузите файл fairy-baby-data.json, чтобы перенести записи со старого сайта. Записи с тем же номером перезапишутся, дубли не появятся.</span><input type="file" id="impFile" accept=".json,application/json"><span class="hint" id="impMsg"></span><div class="row"><button class="sm" id="exportBtn" type="button">Скачать копию данных</button><button class="sm" id="logout" type="button">Выйти из аккаунта</button></div></div>';}
+function importHTML(){return '<div class="card"><h2>Перенос данных</h2><span class="hint">Загрузите файл fairy-baby-data.json, чтобы перенести записи со старого сайта. Записи с тем же номером перезапишутся, дубли не появятся.</span><input type="file" id="impFile" accept=".json,application/json"><span class="hint" id="impMsg"></span><div class="row"><button class="sm" id="exportBtn" type="button">Скачать копию данных</button><button class="sm" id="logout" type="button">Выйти из аккаунта</button></div></div>'+
+  '<div class="card alert"><h2>Начать учёт заново</h2><span class="hint" style="color:var(--fg)">Удалит все записи: приходы, выдачи магазинам, оплаты, долги, расходы и деньги. Склад станет пустым. Перед удалением сайт сам скачает копию данных.</span>'+
+  '<label class="row" style="flex-direction:row;align-items:center;gap:8px;font-weight:600;color:var(--fg)"><input type="checkbox" id="rsShops" style="width:auto"> Удалить также список магазинов</label>'+
+  '<label class="row" style="flex-direction:row;align-items:center;gap:8px;font-weight:600;color:var(--fg)"><input type="checkbox" id="rsProducts" style="width:auto"> Удалить также товары и их цены</label>'+
+  '<label>Для подтверждения напишите слово ОБНУЛИТЬ<input id="rsWord" autocomplete="off"></label>'+
+  '<button class="danger" id="rsGo" type="button">Скачать копию и обнулить</button><span class="hint" id="rsMsg"></span></div>';}
+function downloadBackup(){const data={exportedAt:new Date().toISOString(),products:S.products,parties:S.parties,ops:S.ops};
+  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([JSON.stringify(data,null,1)],{type:"application/json"}));a.download="fairy-baby-data-"+today()+".json";document.body.appendChild(a);a.click();a.remove();}
+document.addEventListener("click",async e=>{if(e.target.id!=="rsGo")return;const msg=$("#rsMsg");
+  if(($("#rsWord").value||"").trim().toUpperCase()!=="ОБНУЛИТЬ"){msg.textContent="Напишите слово ОБНУЛИТЬ, чтобы подтвердить.";return;}
+  e.target.disabled=true;try{downloadBackup();msg.textContent="Копия скачана. Удаляю…";
+    const fs=firebase.firestore();const del=[...S.ops.map(o=>"ops/"+o.id)];
+    if($("#rsShops").checked)for(const p of S.parties)if(p.kind!=="supplier")del.push("parties/"+p.id);
+    if($("#rsProducts").checked)for(const p of S.products)del.push("products/"+p.id);
+    if(!$("#rsShops").checked||!$("#rsProducts").checked){/* keep remembered prices */}
+    for(let i=0;i<del.length;i+=400){const b=fs.batch();for(const path of del.slice(i,i+400))b.delete(fs.doc(path));await b.commit();}
+    msg.textContent="Готово: удалено записей "+del.length+". Учёт начинается с нуля.";toast("Учёт обнулён");$("#rsWord").value="";}
+  catch(err){msg.textContent="Ошибка: "+(err.message||err);}finally{e.target.disabled=false;}});
 document.addEventListener("submit",async e=>{if(e.target.id!=="loginF")return;e.preventDefault();const f=e.target;$("#loginErr").textContent="Вхожу…";
   try{await firebase.auth().signInWithEmailAndPassword(f.email.value.trim(),f.pass.value);}catch(err){$("#loginErr").textContent="Не удалось войти: неверный email или пароль.";}});
-document.addEventListener("click",e=>{if(e.target.id!=="exportBtn")return;const data={exportedAt:new Date().toISOString(),products:S.products,parties:S.parties,ops:S.ops};
-  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([JSON.stringify(data,null,1)],{type:"application/json"}));a.download="fairy-baby-data-"+today()+".json";document.body.appendChild(a);a.click();a.remove();toast("Копия скачана");});
+document.addEventListener("click",e=>{if(e.target.id!=="exportBtn")return;downloadBackup();toast("Копия скачана");});
 document.addEventListener("click",e=>{if(e.target.id==="logout")firebase.auth().signOut().then(()=>location.reload());});
 document.addEventListener("change",async e=>{if(e.target.id!=="impFile")return;const file=e.target.files[0];if(!file)return;const msg=$("#impMsg");
   try{const data=JSON.parse(await file.text());const fs=firebase.firestore();let n=0,batch=fs.batch(),inBatch=0;
