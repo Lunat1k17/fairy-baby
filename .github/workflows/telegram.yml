@@ -1,0 +1,23 @@
+name: Напоминание в Telegram
+on:
+  schedule:
+    - cron: "0 4 * * *"   # каждый день в 9:00 по Ташкенту
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node tools/tg-remind.mjs
+        env:
+          FB_EMAIL: ${{ secrets.FB_EMAIL }}
+          FB_PASSWORD: ${{ secrets.FB_PASSWORD }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          ALWAYS: ${{ github.event_name == 'workflow_dispatch' }}
