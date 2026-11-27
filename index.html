@@ -253,7 +253,7 @@ function dueInfo(pid){const items=S.ops.filter(o=>o.partyId===pid&&(o.type==="sa
 function dueLabel(days){return days<0?"срок прошёл "+(-days)+" "+plural(-days,"день","дня","дней")+" назад":days===0?"срок сегодня":days===1?"срок завтра":"срок через "+days+" "+plural(days,"день","дня","дней");}
 function duePill(pid){const d=dueInfo(pid);if(d.days==null)return"";const cls=d.days<0?"bad":d.days<=2?"warn":"";return ' <span class="pill '+cls+'">'+(d.days<0?"просрочен":"до "+fmtDate(d.next.due).slice(0,5))+'</span>';}
 function alerts(){const t=today();return S.parties.filter(p=>p.kind!=="supplier").map(p=>({p,d:dueInfo(p.id),debt:partyStats(p.id).debt})).filter(r=>r.debt>0.5&&r.d.days!=null&&r.d.days<=2).map(r=>{const lim=r.d.days<=0?today():r.d.next.due;r.due=Math.min(r.debt,r.d.open.filter(x=>x.due&&x.due<=lim).reduce((a,x)=>a+x.left,0));return r;}).sort((a,b)=>a.d.days-b.d.days);}
-function balanceOf(pid){let b=0;for(const o of S.ops){if(o.partyId!==pid)continue;const a=opAmount(o);
+function balanceOf(pid){let b=0;for(const o of S.ops){if(o.partyId!==pid||o.noDebt)continue;const a=opAmount(o);
   if(o.type==="sale"||o.type==="debt_they"||o.type==="pay_out")b+=a;else if(o.type==="pay_in"||o.type==="purchase"||o.type==="debt_me")b-=a;}return b;}
 function lastActivity(pid){let d="";for(const o of S.ops)if(o.partyId===pid&&o.date>d)d=o.date;return d;}
 function totals(){let owedToMe=0,iOwe=0,debtors=0,creditors=0;for(const p of S.parties){const b=balanceOf(p.id);if(b>0.5){owedToMe+=b;debtors++;}else if(b<-0.5){iOwe+=-b;creditors++;}}
@@ -384,11 +384,11 @@ function viewStock(){
      (p.weight?'<span class="sub">'+esc(p.weight)+'</span>':'')+'<span class="sub">Закупка '+(avgCost(p.id)?fmt(avgCost(p.id)):'—')+' · Продажа '+(p.sellPrice?fmt(p.sellPrice):'—')+'</span></button>';}).join("")+'</div>'+
    '<span class="hint">Нажмите на товар, чтобы изменить цену, название или порог «мало».</span></div>';
 }
-function partyStats(pid){let goods=0,paid=0,old=0,adj=0;const kind=(S.parties.find(p=>p.id===pid)||{}).kind;
+function partyStats(pid){let goods=0,paid=0,old=0,adj=0,skip=0;const kind=(S.parties.find(p=>p.id===pid)||{}).kind;
   for(const o of S.ops){if(o.partyId!==pid)continue;const a=opAmount(o);
-    if(kind==="supplier"){if(o.type==="purchase")goods+=a;else if(o.type==="pay_out")paid+=a;else if(o.type==="debt_me"){if(o.adj)adj+=a;else old+=a;}}
+    if(kind==="supplier"){if(o.noDebt)skip+=o.type==="purchase"?a:-a;if(o.type==="purchase")goods+=a;else if(o.type==="pay_out")paid+=a;else if(o.type==="debt_me"){if(o.adj)adj+=a;else old+=a;}}
     else{if(o.type==="sale")goods+=a;else if(o.type==="pay_in")paid+=a;else if(o.type==="debt_they")old+=a;}}
-  return{goods,paid,old,adj,debt:goods+old+adj-paid};}
+  return{goods,paid,old,adj,debt:goods+old+adj-paid-skip};}
 function partyRows(kind){const q=S.q.trim().toLowerCase();
   return S.parties.filter(p=>(p.kind==="supplier")===(kind==="supplier")).filter(p=>!q||p.name.toLowerCase().includes(q)||(p.phone||"").includes(q))
    .map(p=>({p,st:partyStats(p.id),d:lastActivity(p.id)})).sort((a,b)=>b.st.debt-a.st.debt||a.p.name.localeCompare(b.p.name));}
@@ -557,15 +557,15 @@ function sheetBulkPurchase(preParty){
         const rs=$("#rs_"+r.p.id);rs.textContent=r.q>0?money(r.q*r.pr):"";
         if(r.q>0){packs+=r.q;sum+=r.q*r.pr;pcs+=r.q*(r.p.pcs||0);if(!r.pr)miss++;}}
       const debt=sum-pay.get().amount;
-      $("#sum").innerHTML='Итого: '+num(packs)+' пач. · '+money(sum)+(miss?' · <span class="warn">нет цены у '+miss+'</span>':'')+(f.party.value&&debt>0.5?'<br><span class="bad">Мой долг поставщику вырастет на '+money(debt)+'</span>':'');}
+      $("#sum").innerHTML='Итого: '+num(packs)+' пач. · '+money(sum)+(miss?' · <span class="warn">нет цены у '+miss+'</span>':'')+(f.party.value?'<br><span class="sub">Долг поставщику от прихода не меняется. Его можно изменить кнопкой «Изменить мой долг».</span>':'');}
     f.addEventListener("input",e=>{if(/^[qp]_/.test(e.target.name))upd();});f.party.addEventListener("change",upd);upd();
     f.addEventListener("submit",e=>{e.preventDefault();save(async()=>{
       const list=rows().filter(r=>r.q>0);if(!list.length)throw new Error("Впишите количество хотя бы для одного размера.");
       if(list.some(r=>!r.pr))throw new Error("Укажите цену для всех размеров, которые привезли.");if(pay.get().amount>list.reduce((a,r)=>a+r.q*r.pr,0)+0.5)throw new Error("Оплата больше суммы прихода.");
       const partyId=await ensureParty(f.party.value,f.newname.value,"supplier");const date=f.date.value||today(),note=f.note.value.trim(),batch="b"+Date.now();let t=Date.now();
-      for(const r of list){await S.db.collection("ops").add({type:"purchase",productId:r.p.id,qty:r.q,price:r.pr,partyId,date,note,batch,createdAt:t++});
+      for(const r of list){await S.db.collection("ops").add({type:"purchase",productId:r.p.id,qty:r.q,price:r.pr,partyId,date,note,batch,noDebt:true,createdAt:t++});
         if(f.savePrice.checked&&r.pr!==r.p.buyPrice)await S.db.doc("products/"+r.p.id).update({buyPrice:r.pr});}
-      const pv=pay.get();if(pv.amount>0&&partyId)await S.db.collection("ops").add({type:"pay_out",partyId,amount:pv.amount,cash:pv.cash,card:pv.card,method:pv.method,date,note:"при закупке",createdAt:t++});
+      const pv=pay.get();if(pv.amount>0&&partyId)await S.db.collection("ops").add({type:"pay_out",partyId,amount:pv.amount,cash:pv.cash,card:pv.card,method:pv.method,date,note:"при закупке",noDebt:true,createdAt:t++});
     },"Приход сохранён");});});
 }
 function sheetPayment(preParty,preDir){
