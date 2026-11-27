@@ -6,7 +6,6 @@ const API_KEY = "AIzaSyAbZ04WARp1d0OITEqbVCbs22a89KIQNdc";
 const PROJECT = "fairy-baby";
 const SITE = "https://lunat1k17.github.io/fairy-baby/";
 let env = {};
-const MODE = env.MODE || "daily";
 
 const fmt = n => Math.round(n).toLocaleString("ru-RU").replace(/ | /g, " ");
 const money = n => fmt(n) + " сум";
@@ -36,23 +35,43 @@ function val(v) {
 }
 const obj = f => Object.fromEntries(Object.entries(f).map(([k, v]) => [k, val(v)]));
 
-async function loadData() {
+let idToken = "";
+const FS = `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/(default)/documents/`;
+async function fsFetch(path, opt = {}) {
   const h = { "content-type": "application/json", referer: SITE };
-  const r = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${API_KEY}`, { method: "POST", headers: h, body: JSON.stringify({ email: env.FB_EMAIL, password: env.FB_PASSWORD, returnSecureToken: true }) });
-  const auth = await r.json(); if (!auth.idToken) throw new Error("Не удалось войти в Firebase: " + (auth.error && auth.error.message));
+  if (!idToken) {
+    const r = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${API_KEY}`, { method: "POST", headers: h, body: JSON.stringify({ email: env.FB_EMAIL, password: env.FB_PASSWORD, returnSecureToken: true }) });
+    const auth = await r.json(); if (!auth.idToken) throw new Error("Не удалось войти в Firebase: " + (auth.error && auth.error.message));
+    idToken = auth.idToken;
+  }
+  const r = await fetch(FS + path, { ...opt, headers: { ...h, authorization: "Bearer " + idToken } });
+  if (r.status === 404) return null;
+  const j = await r.json(); if (j.error) throw new Error("Firestore: " + j.error.message); return j;
+}
+async function loadData() {
   const out = {};
   for (const name of ["products", "parties", "ops"]) {
     out[name] = []; let page = "";
     do {
-      const u = `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/(default)/documents/${name}?pageSize=300` + (page ? "&pageToken=" + encodeURIComponent(page) : "");
-      const j = await (await fetch(u, { headers: { ...h, authorization: "Bearer " + auth.idToken } })).json();
-      if (j.error) throw new Error("Firestore: " + j.error.message);
-      for (const d of j.documents || []) out[name].push({ id: d.name.split("/").pop(), ...obj(d.fields || {}) });
-      page = j.nextPageToken || "";
+      const j = await fsFetch(`${name}?pageSize=300` + (page ? "&pageToken=" + encodeURIComponent(page) : ""));
+      for (const d of (j && j.documents) || []) out[name].push({ id: d.name.split("/").pop(), ...obj(d.fields || {}) });
+      page = (j && j.nextPageToken) || "";
     } while (page);
   }
   return out;
 }
+
+// ---- Кому можно пользоваться ботом ----
+const owners = () => String(env.TG_CHAT_ID || "").split(/[\s,;]+/).filter(Boolean);
+async function partners() {
+  const d = await fsFetch("settings/telegram");
+  return (d && d.fields ? obj(d.fields).chats : null) || [];
+}
+async function savePartners(list) {
+  const enc = list.map(c => ({ mapValue: { fields: { id: { stringValue: String(c.id) }, name: { stringValue: c.name || "" } } } }));
+  await fsFetch("settings/telegram?updateMask.fieldPaths=chats", { method: "PATCH", body: JSON.stringify({ fields: { chats: { arrayValue: enc.length ? { values: enc } : {} } } }) });
+}
+async function allChats() { return [...new Set([...owners(), ...(await partners()).map(c => String(c.id))])]; }
 
 function build(D) {
   const t = today();
@@ -108,39 +127,67 @@ function build(D) {
   };
 }
 
-
+const COMMANDS = [{ command: "ostatok", description: "Остатки на складе" }, { command: "dolgi", description: "Долги и что пора заказать" }, { command: "vse", description: "Всё вместе" }];
 const HELP = "Команды:\n/ostatok — остатки на складе\n/dolgi — долги и что пора заказать\n/vse — всё вместе";
-function pick(text) {
-  const c = text.trim().toLowerCase().split(/[\s@]/)[0];
-  if (["/ostatok", "/sklad", "остаток", "остатки", "склад"].includes(c)) return "stock";
-  if (["/dolgi", "долги", "долг"].includes(c)) return "debts";
-  if (["/vse", "/start", "всё", "все"].includes(c)) return "daily";
-  return "help";
+const OWNER_HELP = "\n\nДля владельца:\n/dobavit номер — дать доступ партнёру\n/ubrat номер — забрать доступ\n/spisok — кто имеет доступ";
+const sendTo = (chat_id, text) => tg("sendMessage", { chat_id, text, parse_mode: "HTML", disable_web_page_preview: true });
+const who = m => [m.from && m.from.first_name, m.from && m.from.last_name].filter(Boolean).join(" ") + (m.from && m.from.username ? " @" + m.from.username : "");
+
+// Ответ на одно сообщение. cache хранит данные, чтобы не читать их по нескольку раз.
+async function handle(m, cache = {}) {
+  if (!m || !m.text || !m.chat) return;
+  const id = String(m.chat.id), text = m.text.trim(), parts = text.split(/\s+/), c = parts[0].toLowerCase().split("@")[0];
+  const isOwner = owners().includes(id);
+  cache.partners = cache.partners || await partners();
+  const isPartner = cache.partners.some(p => String(p.id) === id);
+  if (!isOwner && !isPartner) {
+    await sendTo(id, `Здравствуйте! Этот бот закрытый.\nВаш номер: <code>${id}</code>\n` + (c === "/start" ? "Владелец получил запрос и может дать вам доступ." : "Нажмите /start, чтобы отправить запрос владельцу."));
+    if (c === "/start") for (const o of owners()) await sendTo(o, `🔑 Просит доступ к боту: <b>${esc(who(m) || "без имени")}</b>\nЧтобы разрешить, отправьте:\n<code>/dobavit ${id}</code>`);
+    return;
+  }
+  if (isOwner && (c === "/dobavit" || c === "/ubrat")) {
+    const target = (parts[1] || "").replace(/[^-\d]/g, "");
+    if (!target) { await sendTo(id, `Напишите номер, например: <code>${c} 123456789</code>`); return; }
+    let list = cache.partners.filter(p => String(p.id) !== target);
+    if (c === "/dobavit") {
+      const name = parts.slice(2).join(" ");
+      list.push({ id: target, name });
+      await savePartners(list); cache.partners = list;
+      await sendTo(id, `✅ Доступ выдан: ${target}${name ? " (" + esc(name) + ")" : ""}. Он будет получать утренние напоминания и сможет смотреть остатки и долги.`);
+      await sendTo(target, "✅ Вам открыли доступ к боту Fairy Baby.\n\n" + HELP).catch(() => {});
+    } else {
+      await savePartners(list); cache.partners = list;
+      await sendTo(id, `Доступ убран: ${target}.`);
+    }
+    return;
+  }
+  if (isOwner && c === "/spisok") {
+    await sendTo(id, cache.partners.length ? "Партнёры с доступом:\n" + cache.partners.map(p => `• <code>${p.id}</code>${p.name ? " " + esc(p.name) : ""}`).join("\n") : "Партнёров пока нет. Пусть партнёр напишет боту /start, и вам придёт запрос.");
+    return;
+  }
+  const w = ["/ostatok", "/sklad", "остаток", "остатки", "склад"].includes(c) ? "stock" : ["/dolgi", "долги", "долг"].includes(c) ? "debts" : ["/vse", "всё", "все"].includes(c) ? "daily" : "help";
+  if (w === "help") { await sendTo(id, (c === "/start" ? "Здравствуйте! " : "") + HELP + (isOwner ? OWNER_HELP : "")); return; }
+  cache.report = cache.report || build(await loadData());
+  await sendTo(id, cache.report[w]);
 }
-const send = (chat_id, text) => tg("sendMessage", { chat_id, text, parse_mode: "HTML", disable_web_page_preview: true });
+
 
 export default {
   async fetch(request, e) {
-    env = e;
+    env = e; idToken = "";
     const url = new URL(request.url);
     if (url.pathname === "/setup") {
       if (!e.WEBHOOK_SECRET || url.searchParams.get("key") !== e.WEBHOOK_SECRET) return new Response("Неверный ключ", { status: 403 });
       for (const k of ["TG_TOKEN", "TG_CHAT_ID", "FB_EMAIL", "FB_PASSWORD"]) if (!e[k]) return new Response("Не задана переменная " + k, { status: 400 });
       await tg("setWebhook", { url: url.origin + "/hook", secret_token: e.WEBHOOK_SECRET, allowed_updates: ["message"], drop_pending_updates: true });
-      await tg("setMyCommands", { commands: [{ command: "ostatok", description: "Остатки на складе" }, { command: "dolgi", description: "Долги и что пора заказать" }, { command: "vse", description: "Всё вместе" }] });
-      await send(e.TG_CHAT_ID, "✅ Сервер подключён. Теперь бот отвечает на команды сразу.\n\n" + HELP);
+      await tg("setMyCommands", { commands: COMMANDS });
+      for (const o of owners()) await sendTo(o, "✅ Сервер подключён. Теперь бот отвечает на команды сразу.\n\n" + HELP + OWNER_HELP);
       return new Response("Готово! Бот подключён, проверьте Telegram.", { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
     if (url.pathname === "/hook" && request.method === "POST") {
       if (request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== e.WEBHOOK_SECRET) return new Response("forbidden", { status: 403 });
       const u = await request.json().catch(() => ({}));
-      const m = u.message;
-      if (!m || !m.text || String(m.chat.id) !== String(e.TG_CHAT_ID)) return new Response("ok");
-      const w = pick(m.text);
-      try {
-        if (w === "help") await send(m.chat.id, HELP);
-        else await send(m.chat.id, build(await loadData())[w]);
-      } catch (err) { await send(m.chat.id, "Не получилось: " + err.message).catch(() => {}); }
+      try { await handle(u.message); } catch (err) { if (u.message && u.message.chat) await sendTo(u.message.chat.id, "Не получилось: " + esc(err.message)).catch(() => {}); }
       return new Response("ok");
     }
     return new Response("Fairy Baby bot", { headers: { "content-type": "text/plain; charset=utf-8" } });

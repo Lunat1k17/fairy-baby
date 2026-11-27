@@ -1,7 +1,8 @@
 // Telegram-бот Fairy Baby. Запускается GitHub Actions.
 // MODE=daily: утреннее сообщение (долги, пора заказывать, остатки).
-// MODE=poll: отвечает на команды /ostatok, /dolgi, /vse (проверка каждые несколько минут).
-// Секреты: FB_EMAIL, FB_PASSWORD, TG_TOKEN, TG_CHAT_ID.
+// MODE=poll: отвечает на команды (проверка каждые несколько минут, если нет сервера Cloudflare).
+// Секреты: FB_EMAIL, FB_PASSWORD, TG_TOKEN, TG_CHAT_ID (владелец; можно несколько через запятую).
+// Партнёров владелец добавляет в боте командой /dobavit <номер>; список хранится в Firestore settings/telegram.
 // ---core-start (общая часть, копируется в telegram-worker.js)
 const API_KEY = "AIzaSyAbZ04WARp1d0OITEqbVCbs22a89KIQNdc";
 const PROJECT = "fairy-baby";
@@ -37,24 +38,46 @@ function val(v) {
 }
 const obj = f => Object.fromEntries(Object.entries(f).map(([k, v]) => [k, val(v)]));
 
+let idToken = "";
+const FS = `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/(default)/documents/`;
+async function fsFetch(path, opt = {}) {
+  const h = { "content-type": "application/json", referer: SITE };
+  if (!idToken) {
+    const r = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${API_KEY}`, { method: "POST", headers: h, body: JSON.stringify({ email: env.FB_EMAIL, password: env.FB_PASSWORD, returnSecureToken: true }) });
+    const auth = await r.json(); if (!auth.idToken) throw new Error("Не удалось войти в Firebase: " + (auth.error && auth.error.message));
+    idToken = auth.idToken;
+  }
+  const r = await fetch(FS + path, { ...opt, headers: { ...h, authorization: "Bearer " + idToken } });
+  if (r.status === 404) return null;
+  const j = await r.json(); if (j.error) throw new Error("Firestore: " + j.error.message); return j;
+}
 async function loadData() {
   if (env.FIXTURE) return JSON.parse((await import("node:fs")).readFileSync(env.FIXTURE, "utf8"));
-  const h = { "content-type": "application/json", referer: SITE };
-  const r = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${API_KEY}`, { method: "POST", headers: h, body: JSON.stringify({ email: env.FB_EMAIL, password: env.FB_PASSWORD, returnSecureToken: true }) });
-  const auth = await r.json(); if (!auth.idToken) throw new Error("Не удалось войти в Firebase: " + (auth.error && auth.error.message));
   const out = {};
   for (const name of ["products", "parties", "ops"]) {
     out[name] = []; let page = "";
     do {
-      const u = `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/(default)/documents/${name}?pageSize=300` + (page ? "&pageToken=" + encodeURIComponent(page) : "");
-      const j = await (await fetch(u, { headers: { ...h, authorization: "Bearer " + auth.idToken } })).json();
-      if (j.error) throw new Error("Firestore: " + j.error.message);
-      for (const d of j.documents || []) out[name].push({ id: d.name.split("/").pop(), ...obj(d.fields || {}) });
-      page = j.nextPageToken || "";
+      const j = await fsFetch(`${name}?pageSize=300` + (page ? "&pageToken=" + encodeURIComponent(page) : ""));
+      for (const d of (j && j.documents) || []) out[name].push({ id: d.name.split("/").pop(), ...obj(d.fields || {}) });
+      page = (j && j.nextPageToken) || "";
     } while (page);
   }
   return out;
 }
+
+// ---- Кому можно пользоваться ботом ----
+const owners = () => String(env.TG_CHAT_ID || "").split(/[\s,;]+/).filter(Boolean);
+async function partners() {
+  if (env.FIXTURE_PARTNERS) return JSON.parse(env.FIXTURE_PARTNERS);
+  const d = await fsFetch("settings/telegram");
+  return (d && d.fields ? obj(d.fields).chats : null) || [];
+}
+async function savePartners(list) {
+  if (env.FIXTURE_PARTNERS !== undefined) { env.FIXTURE_PARTNERS = JSON.stringify(list); return; }
+  const enc = list.map(c => ({ mapValue: { fields: { id: { stringValue: String(c.id) }, name: { stringValue: c.name || "" } } } }));
+  await fsFetch("settings/telegram?updateMask.fieldPaths=chats", { method: "PATCH", body: JSON.stringify({ fields: { chats: { arrayValue: enc.length ? { values: enc } : {} } } }) });
+}
+async function allChats() { return [...new Set([...owners(), ...(await partners()).map(c => String(c.id))])]; }
 
 function build(D) {
   const t = today();
@@ -110,6 +133,50 @@ function build(D) {
   };
 }
 
+const COMMANDS = [{ command: "ostatok", description: "Остатки на складе" }, { command: "dolgi", description: "Долги и что пора заказать" }, { command: "vse", description: "Всё вместе" }];
+const HELP = "Команды:\n/ostatok — остатки на складе\n/dolgi — долги и что пора заказать\n/vse — всё вместе";
+const OWNER_HELP = "\n\nДля владельца:\n/dobavit номер — дать доступ партнёру\n/ubrat номер — забрать доступ\n/spisok — кто имеет доступ";
+const sendTo = (chat_id, text) => tg("sendMessage", { chat_id, text, parse_mode: "HTML", disable_web_page_preview: true });
+const who = m => [m.from && m.from.first_name, m.from && m.from.last_name].filter(Boolean).join(" ") + (m.from && m.from.username ? " @" + m.from.username : "");
+
+// Ответ на одно сообщение. cache хранит данные, чтобы не читать их по нескольку раз.
+async function handle(m, cache = {}) {
+  if (!m || !m.text || !m.chat) return;
+  const id = String(m.chat.id), text = m.text.trim(), parts = text.split(/\s+/), c = parts[0].toLowerCase().split("@")[0];
+  const isOwner = owners().includes(id);
+  cache.partners = cache.partners || await partners();
+  const isPartner = cache.partners.some(p => String(p.id) === id);
+  if (!isOwner && !isPartner) {
+    await sendTo(id, `Здравствуйте! Этот бот закрытый.\nВаш номер: <code>${id}</code>\n` + (c === "/start" ? "Владелец получил запрос и может дать вам доступ." : "Нажмите /start, чтобы отправить запрос владельцу."));
+    if (c === "/start") for (const o of owners()) await sendTo(o, `🔑 Просит доступ к боту: <b>${esc(who(m) || "без имени")}</b>\nЧтобы разрешить, отправьте:\n<code>/dobavit ${id}</code>`);
+    return;
+  }
+  if (isOwner && (c === "/dobavit" || c === "/ubrat")) {
+    const target = (parts[1] || "").replace(/[^-\d]/g, "");
+    if (!target) { await sendTo(id, `Напишите номер, например: <code>${c} 123456789</code>`); return; }
+    let list = cache.partners.filter(p => String(p.id) !== target);
+    if (c === "/dobavit") {
+      const name = parts.slice(2).join(" ");
+      list.push({ id: target, name });
+      await savePartners(list); cache.partners = list;
+      await sendTo(id, `✅ Доступ выдан: ${target}${name ? " (" + esc(name) + ")" : ""}. Он будет получать утренние напоминания и сможет смотреть остатки и долги.`);
+      await sendTo(target, "✅ Вам открыли доступ к боту Fairy Baby.\n\n" + HELP).catch(() => {});
+    } else {
+      await savePartners(list); cache.partners = list;
+      await sendTo(id, `Доступ убран: ${target}.`);
+    }
+    return;
+  }
+  if (isOwner && c === "/spisok") {
+    await sendTo(id, cache.partners.length ? "Партнёры с доступом:\n" + cache.partners.map(p => `• <code>${p.id}</code>${p.name ? " " + esc(p.name) : ""}`).join("\n") : "Партнёров пока нет. Пусть партнёр напишет боту /start, и вам придёт запрос.");
+    return;
+  }
+  const w = ["/ostatok", "/sklad", "остаток", "остатки", "склад"].includes(c) ? "stock" : ["/dolgi", "долги", "долг"].includes(c) ? "debts" : ["/vse", "всё", "все"].includes(c) ? "daily" : "help";
+  if (w === "help") { await sendTo(id, (c === "/start" ? "Здравствуйте! " : "") + HELP + (isOwner ? OWNER_HELP : "")); return; }
+  cache.report = cache.report || build(await loadData());
+  await sendTo(id, cache.report[w]);
+}
+
 // ---core-end
 
 async function main() {
@@ -125,12 +192,12 @@ async function main() {
   }
   if (MODE === "poll") return poll();
   const r = build(await loadData());
-  if (env.FIXTURE) { console.log(r.daily + "\n-----\n" + r.stock + "\n-----\n" + r.debts); return; }
-  await tg("setMyCommands", { commands: [{ command: "ostatok", description: "Остатки на складе" }, { command: "dolgi", description: "Долги и что пора заказать" }, { command: "vse", description: "Всё вместе" }] });
-  await send(r.daily);
-  console.log("Сообщение отправлено.");
+  if (env.FIXTURE && !env.TG_TOKEN) { console.log(r.daily + "\n-----\n" + r.stock + "\n-----\n" + r.debts); return; }
+  await tg("setMyCommands", { commands: COMMANDS });
+  const chats = await allChats();
+  for (const c of chats) await sendTo(c, r.daily).catch(e => console.log("Не отправил в один из чатов: " + e.message));
+  console.log("Сообщение отправлено в чатов: " + chats.length);
 }
-const send = text => tg("sendMessage", { chat_id: env.TG_CHAT_ID, text, parse_mode: "HTML", disable_web_page_preview: true });
 
 async function poll() {
   // Если подключён сервер Cloudflare (вебхук), команды отвечает он, а здесь делать нечего.
@@ -138,22 +205,10 @@ async function poll() {
   if (wh.url) { console.log("Команды обрабатывает сервер Cloudflare."); return; }
   const ups = await tg("getUpdates", { timeout: 0, allowed_updates: ["message"] });
   if (!ups.length) { console.log("Новых команд нет."); return; }
-  const cmds = ups.map(u => u.message).filter(m => m && String(m.chat.id) === String(env.TG_CHAT_ID) && m.text)
-    .map(m => m.text.trim().toLowerCase().split(/[\s@]/)[0]);
   // Подтверждаем, чтобы Telegram не прислал эти сообщения снова.
   await tg("getUpdates", { offset: ups[ups.length - 1].update_id + 1, timeout: 0 });
-  const want = new Set();
-  for (const c of cmds) {
-    if (["/ostatok", "/sklad", "остаток", "остатки", "склад"].includes(c)) want.add("stock");
-    else if (["/dolgi", "долги", "долг"].includes(c)) want.add("debts");
-    else if (["/vse", "/start", "/help", "всё", "все"].includes(c)) want.add("daily");
-    else want.add("help");
-  }
-  if (!want.size) { console.log("Команд от владельца нет."); return; }
-  if (want.has("help") && want.size === 1) { await send("Команды:\n/ostatok — остатки на складе\n/dolgi — долги и что пора заказать\n/vse — всё вместе"); return; }
-  want.delete("help");
-  const r = build(await loadData());
-  for (const w of want) await send(r[w]);
-  console.log("Ответил на команды: " + [...want].join(", "));
+  const cache = {};
+  for (const u of ups) await handle(u.message, cache).catch(e => console.log("Ошибка: " + e.message));
+  console.log("Обработано сообщений: " + ups.length);
 }
 main().catch(e => { console.error(e.message); process.exit(1); });
