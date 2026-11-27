@@ -1,8 +1,7 @@
 name: Напоминание в Telegram
+# Утреннее сообщение и ответы на команды теперь делает сервер Cloudflare (tools/telegram-worker.js).
+# Здесь осталась ручная отправка: Actions → Run workflow.
 on:
-  schedule:
-    - cron: "0 4 * * *"     # каждый день в 9:00 по Ташкенту: утреннее сообщение
-    - cron: "*/5 * * * *"   # каждые 5 минут: ответы на команды /ostatok, /dolgi
   workflow_dispatch:
 permissions:
   contents: read

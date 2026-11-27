@@ -1,6 +1,7 @@
 // Сервер Telegram-бота Fairy Baby для Cloudflare Workers (бесплатно).
 // Файл собран из tools/tg-remind.mjs командой node tools/make-worker.mjs. Не правьте вручную.
 // Переменные (Settings → Variables and Secrets): TG_TOKEN, TG_CHAT_ID, FB_EMAIL, FB_PASSWORD, WEBHOOK_SECRET.
+// Утреннее сообщение: Settings → Trigger Events → Cron Triggers → 0 4 * * *
 // ---core-start (общая часть, копируется в telegram-worker.js)
 const API_KEY = "AIzaSyAbZ04WARp1d0OITEqbVCbs22a89KIQNdc";
 const PROJECT = "fairy-baby";
@@ -191,5 +192,11 @@ export default {
       return new Response("ok");
     }
     return new Response("Fairy Baby bot", { headers: { "content-type": "text/plain; charset=utf-8" } });
+  },
+  // Утреннее сообщение. В Cloudflare: Settings → Trigger Events → Cron: 0 4 * * * (9:00 по Ташкенту).
+  async scheduled(event, e, ctx) {
+    env = e; idToken = "";
+    const r = build(await loadData());
+    for (const c of await allChats()) await sendTo(c, r.daily).catch(() => {});
   },
 };
